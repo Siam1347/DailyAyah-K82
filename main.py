@@ -3,11 +3,14 @@ import requests
 import random
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
-
 import os
+from flask import Flask
+import threading
+import asyncio
+
+# Discord bot setup
 TOKEN = os.getenv("DISCORD_TOKEN")
- 
-CHANNEL_ID = 1465732469436186751
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
@@ -44,4 +47,19 @@ async def on_ready():
     scheduler.start()
     await send_daily_ayah()
 
+# --- Flask server to satisfy Render free tier ---
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "DailyAyah Bot is running!"
+
+def run():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# Run Flask in a separate thread
+threading.Thread(target=run).start()
+
+# Run Discord bot
 client.run(TOKEN)

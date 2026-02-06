@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 import requests
 import random
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -6,65 +7,118 @@ import pytz
 import os
 from flask import Flask
 import threading
-import asyncio
 import time
 
-# --- Discord Bot Setup ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-intents = discord.Intents.all()
-client = discord.Client(intents=intents)
-
 timezone = pytz.timezone("Asia/Dhaka")
 
-# --- Function to get random ayah with retries ---
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# ---------------- Ayah Helpers ----------------
+
+def get_ayah(surah, ayah):
+    data = requests.get(
+        f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}/en.sahih"
+    ).json()
+    ar = requests.get(
+        f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}"
+    ).json()
+
+    return (
+        ar["data"]["text"],
+        data["data"]["text"],
+        data["data"]["surah"]["englishName"],
+        ayah,
+        data["data"]["surah"]["numberOfAyahs"]
+    )
+
 def get_random_ayah():
-    for _ in range(3):  # Retry 3 times if API fails
-        try:
-            ayah_number = random.randint(1, 6236)
-            arabic = requests.get(f"https://api.alquran.cloud/v1/ayah/{ayah_number}").json()
-            english = requests.get(f"https://api.alquran.cloud/v1/ayah/{ayah_number}/en.sahih").json()
+    surah = random.randint(1, 114)
+    ayah = random.randint(1, 7)
+    return get_ayah(surah, ayah)
 
-            ar_text = arabic["data"]["text"]
-            en_text = english["data"]["text"]
-            surah = english["data"]["surah"]["englishName"]
-            ayah_num = english["data"]["numberInSurah"]
+# ---------------- Button View ----------------
 
-            return ar_text, en_text, surah, ayah_num
-        except Exception as e:
-            print("Error fetching ayah:", e)
-            time.sleep(1)
-    return "Error", "Error", "Error", 0
+class AyahView(discord.ui.View):
+    def __init__(self, surah, ayah, max_ayah):
+        super().__init__(timeout=120)
+        self.surah = surah
+        self.ayah = ayah
+        self.max_ayah = max_ayah
 
-# --- Function to send ayah to Discord ---
+    @discord.ui.button(label="Next Ayah ▶", style=discord.ButtonStyle.primary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ayah + 1 > self.max_ayah:
+            await interaction.response.send_message(
+                "End of this Surah.", ephemeral=True
+            )
+            return
+
+        self.ayah += 1
+        ar, en, surah_name, num, max_ayah = get_ayah(self.surah, self.ayah)
+
+        await interaction.response.edit_message(
+            content=(
+                f"📖 **Surah {surah_name} – Ayah {num}**\n\n"
+                f"{ar}\n\n**Translation:** {en}"
+            ),
+            view=self
+        )
+
+# ---------------- Slash Commands ----------------
+
+@tree.command(name="ayah", description="Get a random Quran ayah")
+async def ayah(interaction: discord.Interaction):
+    ar, en, surah, num, max_ayah = get_random_ayah()
+    await interaction.response.send_message(
+        f"📖 **Surah {surah} – Ayah {num}**\n\n{ar}\n\n**Translation:** {en}",
+        view=AyahView(random.randint(1,114), num, max_ayah)
+    )
+
+@tree.command(name="surah", description="Get ayahs from a specific surah")
+@app_commands.describe(number="Surah number (1–114)")
+async def surah(interaction: discord.Interaction, number: int):
+    if not 1 <= number <= 114:
+        await interaction.response.send_message("Invalid surah number.", ephemeral=True)
+        return
+
+    ar, en, surah_name, num, max_ayah = get_ayah(number, 1)
+    await interaction.response.send_message(
+        f"📖 **Surah {surah_name} – Ayah 1**\n\n{ar}\n\n**Translation:** {en}",
+        view=AyahView(number, 1, max_ayah)
+    )
+
+# ---------------- Daily Ayah ----------------
+
 async def send_daily_ayah():
-    try:
-        channel = client.get_channel(CHANNEL_ID)
-        if channel:
-            ar, en, surah, num = get_random_ayah()
-            message = f"📖 **Daily Ayah**\n\n{ar}\n\n**Translation:** {en}\n— Surah {surah}, Ayah {num}"
-            await channel.send(message)
-        else:
-            print("Channel not found. Check CHANNEL_ID.")
-    except Exception as e:
-        print("Error sending Daily Ayah:", e)
+    channel = client.get_channel(CHANNEL_ID)
+    if channel:
+        ar, en, surah, num, _ = get_random_ayah()
+        await channel.send(
+            f"📖 **Daily Ayah**\n\n{ar}\n\n**Translation:** {en}"
+        )
 
-# --- Discord on_ready event ---
+# ---------------- Ready Event ----------------
+
 @client.event
 async def on_ready():
-    print(f"{client.user} is online!")
+    await tree.sync()
+    print("Commands synced.")
     scheduler = AsyncIOScheduler(timezone=timezone)
-    scheduler.add_job(send_daily_ayah, "cron", hour=6, minute=0)  # 6 AM Dhaka time
+    scheduler.add_job(send_daily_ayah, "cron", hour=6, minute=0)
     scheduler.start()
-    await send_daily_ayah()  # Send immediately on startup
 
-# --- Tiny Flask server to keep Render happy ---
+# ---------------- Flask (Render keepalive) ----------------
+
 app = Flask("")
 
 @app.route("/")
 def home():
-    return "DailyAyah Bot is running!"
+    return "Bot running"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -72,17 +126,6 @@ def run_flask():
 
 threading.Thread(target=run_flask).start()
 
-# --- Self-ping to prevent Render free tier from sleeping ---
-def keep_alive():
-    url = f"http://localhost:{os.environ.get('PORT', 8080)}/"
-    while True:
-        try:
-            requests.get(url)
-        except:
-            pass
-        time.sleep(300)  # every 5 minutes
+# ---------------- Start Bot ----------------
 
-threading.Thread(target=keep_alive).start()
-
-# --- Run Discord bot ---
 client.run(TOKEN)
